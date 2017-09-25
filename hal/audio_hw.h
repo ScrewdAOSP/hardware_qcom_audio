@@ -25,15 +25,17 @@
 #include <tinycompress/tinycompress.h>
 
 #include <audio_route/audio_route.h>
+#include <audio_utils/ErrorLog.h>
+#include <audio_utils/PowerLog.h>
 #include "voice.h"
 
 // dlopen() does not go through default library path search if there is a "/" in the library name.
 #ifdef __LP64__
-#define VISUALIZER_LIBRARY_PATH "/system/lib64/soundfx/libqcomvisualizer.so"
-#define OFFLOAD_EFFECTS_BUNDLE_LIBRARY_PATH "/system/lib64/soundfx/libqcompostprocbundle.so"
+#define VISUALIZER_LIBRARY_PATH "/vendor/lib64/soundfx/libqcomvisualizer.so"
+#define OFFLOAD_EFFECTS_BUNDLE_LIBRARY_PATH "/vendor/lib64/soundfx/libqcompostprocbundle.so"
 #else
-#define VISUALIZER_LIBRARY_PATH "/system/lib/soundfx/libqcomvisualizer.so"
-#define OFFLOAD_EFFECTS_BUNDLE_LIBRARY_PATH "/system/lib/soundfx/libqcompostprocbundle.so"
+#define VISUALIZER_LIBRARY_PATH "/vendor/lib/soundfx/libqcomvisualizer.so"
+#define OFFLOAD_EFFECTS_BUNDLE_LIBRARY_PATH "/vendor/lib/soundfx/libqcompostprocbundle.so"
 #endif
 #define ADM_LIBRARY_PATH "libadm.so"
 
@@ -49,7 +51,27 @@
 #define ACDB_DEV_TYPE_IN 2
 
 #define MAX_SUPPORTED_CHANNEL_MASKS 2
+#define MAX_SUPPORTED_FORMATS 15
+#define MAX_SUPPORTED_SAMPLE_RATES 7
 #define DEFAULT_HDMI_OUT_CHANNELS   2
+
+#define ERROR_LOG_ENTRIES 16
+
+#define POWER_LOG_LINES 40
+#define POWER_LOG_SAMPLING_INTERVAL_MS 50
+#define POWER_LOG_ENTRIES (1 /* minutes */ * 60 /* seconds */ * 1000 /* msec */ \
+                           / POWER_LOG_SAMPLING_INTERVAL_MS)
+
+/* Error types for the error log */
+enum {
+    ERROR_CODE_STANDBY = 1,
+    ERROR_CODE_WRITE,
+};
+
+typedef enum card_status_t {
+    CARD_STATUS_OFFLINE,
+    CARD_STATUS_ONLINE
+} card_status_t;
 
 /* These are the supported use cases by the hardware.
  * Each usecase is mapped to a specific PCM device.
@@ -64,6 +86,7 @@ enum {
     USECASE_AUDIO_PLAYBACK_OFFLOAD,
     USECASE_AUDIO_PLAYBACK_TTS,
     USECASE_AUDIO_PLAYBACK_ULL,
+    USECASE_AUDIO_PLAYBACK_MMAP,
 
     /* HFP Use case*/
     USECASE_AUDIO_HFP_SCO,
@@ -72,6 +95,7 @@ enum {
     /* Capture usecases */
     USECASE_AUDIO_RECORD,
     USECASE_AUDIO_RECORD_LOW_LATENCY,
+    USECASE_AUDIO_RECORD_MMAP,
 
     /* Voice extension usecases
      *
@@ -128,6 +152,7 @@ enum {
     OFFLOAD_CMD_DRAIN,              /* send a full drain request to DSP */
     OFFLOAD_CMD_PARTIAL_DRAIN,      /* send a partial drain request to DSP */
     OFFLOAD_CMD_WAIT_FOR_BUFFER,    /* wait for buffer released by DSP */
+    OFFLOAD_CMD_ERROR,              /* offload playback hit some error */
 };
 
 enum {
@@ -177,8 +202,13 @@ struct stream_out {
     void *offload_cookie;
     struct compr_gapless_mdata gapless_mdata;
     int send_new_metadata;
-
+    bool realtime;
+    int af_period_multiplier;
     struct audio_device *dev;
+    card_status_t card_status;
+
+    error_log_t *error_log;
+    power_log_t *power_log;
 };
 
 struct stream_in {
@@ -201,12 +231,15 @@ struct stream_in {
     audio_input_flags_t flags;
     bool is_st_session;
     bool is_st_session_active;
-
+    bool realtime;
+    int af_period_multiplier;
     struct audio_device *dev;
     audio_format_t format;
+    card_status_t card_status;
+    int capture_started;
 };
 
-typedef enum {
+typedef enum usecase_type_t {
     PCM_PLAYBACK,
     PCM_CAPTURE,
     VOICE_CALL,
@@ -235,6 +268,12 @@ typedef void (*adm_register_input_stream_t)(void *, audio_io_handle_t, audio_inp
 typedef void (*adm_deregister_stream_t)(void *, audio_io_handle_t);
 typedef void (*adm_request_focus_t)(void *, audio_io_handle_t);
 typedef void (*adm_abandon_focus_t)(void *, audio_io_handle_t);
+typedef void (*adm_set_config_t)(void *, audio_io_handle_t,
+                                         struct pcm *,
+                                         struct pcm_config *);
+typedef void (*adm_request_focus_v2_t)(void *, audio_io_handle_t, long);
+typedef bool (*adm_is_noirq_avail_t)(void *, int, int, int);
+typedef void (*adm_on_routing_change_t)(void *, audio_io_handle_t);
 
 struct audio_device {
     struct audio_hw_device device;
@@ -262,6 +301,8 @@ struct audio_device {
     void *platform;
     void *extspk;
 
+    card_status_t card_status;
+
     void *visualizer_lib;
     int (*visualizer_start_output)(audio_io_handle_t, int);
     int (*visualizer_stop_output)(audio_io_handle_t, int);
@@ -286,10 +327,13 @@ struct audio_device {
     adm_deregister_stream_t adm_deregister_stream;
     adm_request_focus_t adm_request_focus;
     adm_abandon_focus_t adm_abandon_focus;
+    adm_set_config_t adm_set_config;
+    adm_request_focus_v2_t adm_request_focus_v2;
+    adm_is_noirq_avail_t adm_is_noirq_avail;
+    adm_on_routing_change_t adm_on_routing_change;
 
     /* logging */
     snd_device_t last_logged_snd_device[AUDIO_USECASE_MAX][2]; /* [out, in] */
-
 };
 
 int select_devices(struct audio_device *adev,

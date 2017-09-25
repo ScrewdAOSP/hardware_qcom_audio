@@ -421,6 +421,13 @@ int platform_set_snd_device_acdb_id(snd_device_t snd_device __unused,
     return -ENODEV;
 }
 
+int platform_get_default_app_type_v2(void *platform, usecase_type_t type __unused,
+                                     int *app_type __unused)
+{
+    ALOGE("%s: Not implemented", __func__);
+    return -ENOSYS;
+}
+
 int platform_get_snd_device_acdb_id(snd_device_t snd_device __unused)
 {
     ALOGE("%s: Not implemented", __func__);
@@ -1072,14 +1079,14 @@ int platform_swap_lr_channels(struct audio_device *adev, bool swap_channels)
 bool platform_send_gain_dep_cal(void *platform __unused,
                                 int level __unused)
 {
-    return 0;
+    return true;
 }
 
-bool platform_can_split_snd_device(snd_device_t in_snd_device __unused,
+int platform_can_split_snd_device(snd_device_t in_snd_device __unused,
                                    int *num_devices __unused,
                                    snd_device_t *out_snd_devices __unused)
 {
-    return false;
+    return -ENOSYS;
 }
 
 bool platform_check_backends_match(snd_device_t snd_device1 __unused,
@@ -1092,8 +1099,16 @@ int platform_get_snd_device_name_extn(void *platform __unused,
                                       snd_device_t snd_device,
                                       char *device_name)
 {
-    device_name = platform_get_snd_device_name(snd_device);
+    strlcpy(device_name, platform_get_snd_device_name(snd_device),
+            DEVICE_NAME_MAX_SIZE);
     return 0;
+}
+
+bool platform_check_and_set_playback_backend_cfg(struct audio_device* adev __unused,
+                                              struct audio_usecase *usecase __unused,
+                                              snd_device_t snd_device __unused)
+{
+    return false;
 }
 
 bool platform_check_and_set_capture_backend_cfg(struct audio_device* adev __unused,
@@ -1102,3 +1117,19 @@ bool platform_check_and_set_capture_backend_cfg(struct audio_device* adev __unus
     return false;
 }
 
+bool platform_add_gain_level_mapping(struct amp_db_and_gain_table *tbl_entry __unused)
+{
+    return false;
+}
+
+int platform_get_gain_level_mapping(struct amp_db_and_gain_table *mapping_tbl __unused,
+                                    int table_size __unused)
+{
+    return 0;
+}
+
+int platform_snd_card_update(void *platform __unused,
+                             card_status_t status __unused)
+{
+    return -1;
+}
